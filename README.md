@@ -44,8 +44,9 @@ For a backup I do this:
 For a restore, the current procedure has a downtime that is fine for me:
 
 - spin up a new droplet in [DigitalOcean][] installing [Dokku][] according
-  to the unattended procedure (see [here][dokku-unattended] for a suitable
-  *cloud-init* file, just change `example.com` to your domain)
+  to the unattended procedure ([see here for a suitable *cloud-init*
+  file][dokku-unattended], just change `example.com` to
+  your domain)
 - wait for [Dokku][] to be up and running on the new droplet (check
   `/var/log/cloud-init-output.log` to track advance)
 - re-assign the floating IP to this new droplet (this is where the
