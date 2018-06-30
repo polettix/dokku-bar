@@ -1,33 +1,43 @@
 #!/bin/bash
 
-bar_pd() {
-   ssh "$DOKKU_HOST" "$@"
+bar_is_true() {
+   case "$1" in
+      (y|yes|Y|Yes|YES|t|true|T|True|TRUE|1)
+         return 0
+         ;;
+      (*)
+         return 1
+         ;;
+   esac
 }
 
-bar_d() {
-   dokku "$@"
+bar_pd() {
+   ssh "$DOKKU_HOST" "$@"
 }
 
 bar_log() {
    printf '%s\n' "$*" >&2
 }
 
-bar_app_name() {
-   (
-      while [[ "$PWD" != '/' ]] && ! [[ -d .git ]] ; do cd .. ; done
-      [[ -d .git ]] && basename "$PWD"
-   )
-}
+bar_help() {
+   cat >&2 <<'END'
+CHECK_ENV
+   (boolean) only print out environment for a command
+DISABLE_CHECKS
+   (boolean) set whether to disable checks in restored applications
+DOKKU_HOST
+   hostname/IP address of target dokku installation
+DUMPDIR
+   the directory where the backup is saved/taken
+KEEP_RUNNING
+   (boolean) set whether to stop applications before backup or not
+REMOTE
+   name of the remote to set in repositories for restored apps
+   Defaults to `dokku`. Skips creating it in case it already exists
+   so BE CAREFUL!
 
-bar_linked_postgres() {
-   local NAME REST
-   dokku postgres:list \
-      | sed -e 1d \
-      | while read NAME REST ; do
-            dokku postgres:info "$NAME" --links </dev/null \
-            | grep "\\<$APP\\>" >/dev/null 2>&1 \
-            && printf '%s\n' "$NAME"
-      done
+Booleans default to false, true is y|yes|Y|Yes|YES|t|true|T|True|TRUE|1
+END
 }
 
 # this operation is cross-application
@@ -60,7 +70,7 @@ bar_backup_stop_apps() {
    bar_pd ps:stopall
 }
 
-bar_backup_start_app() {
+bar_backup_start_apps() {
    bar_pd ps:startall
 }
 
@@ -106,7 +116,7 @@ bar_backup_letsencrypt() {
 
 bar_backup() {
    local DUMPDIR
-   [[ -n "$1" ]] && export DUMPDIR="$1"
+   [[ -n "$1" ]] && DUMPDIR="$1"
    [[ -z "$DUMPDIR" ]] && DUMPDIR="DOKKU-$(date +'%Y%m%d-%H%M%S')"
    [[ ! -d "$DUMPDIR" ]] && mkdir "$DUMPDIR"
    if [[ ! -d "$DUMPDIR" ]] ; then
@@ -114,14 +124,20 @@ bar_backup() {
       return 1
    fi
    export DUMPDIR="$(readlink -f "$DUMPDIR")"
-   [ -n "$KEEP_RUNNING" ] || bar_backup_stop_apps
-   bar_backup_global_configs
-   bar_backup_storage
-   bar_backup_postgres
-   bar_backup_apps
-   bar_backup_letsencrypt
-   [ -n "$KEEP_RUNNING" ] || bar_backup_start_apps
-   printf '%s\n' "$DUMPDIR"
+   if bar_is_true "$CHECK_ENV" ; then
+      env
+      return 1
+   fi
+   {
+      bar_is_true "$KEEP_RUNNING" || bar_backup_stop_apps
+      bar_backup_global_configs
+      bar_backup_storage
+      bar_backup_postgres
+      bar_backup_apps
+      bar_backup_letsencrypt
+      bar_is_true "$KEEP_RUNNING" || bar_backup_start_apps
+   } >&2
+   printf '%s\n' "export DUMPDIR='$DUMPDIR'"
 }
 
 bar_restore_generic_configs() {
@@ -130,69 +146,87 @@ bar_restore_generic_configs() {
    bar_pd config:set --global $CONFIGS
 }
 
+bar_restore_create_app() {
+   local NAME="$1" CONFIGS VOLUME
+   bar_log "-----> Create app <$NAME>"
+   bar_pd apps:exists "$NAME" </dev/null && return 0
+   bar_pd apps:create "$NAME"
+   CONFIGS="$(<"$DUMPDIR/$NAME.env")"
+   bar_pd config:set "$NAME" $CONFIGS
+   bar_is_true "$DISABLE_CHECKS" && bar_pd checks:skip "$NAME"
+   cat "$DUMPDIR/$NAME.vol.list" \
+      | while read VOLUME ; do
+         bar_pd storage:mount "$NAME" "$VOLUME"
+      done
+}
+
 bar_restore_create_apps() {
-   local NAME CONFIGS TARFILE VOLUME
+   bar_log '-----> Create apps'
    cat "$DUMPDIR/apps.list" \
       | while read NAME ; do
-      {
-         bar_pd apps:exists "$NAME" </dev/null && continue
-         bar_pd apps:create "$NAME"
-         CONFIGS="$(<"$DUMPDIR/$NAME.env")"
-         bar_pd config:set "$NAME" $CONFIGS
-         bar_pd checks:skip "$NAME"
-         cat "$DUMPDIR/$NAME.vol.list" \
-            | while read VOLUME ; do
-               bar_pd storage:mount "$NAME" "$VOLUME"
-            done
-      } </dev/null
+         bar_restore_create_app "$NAME" </dev/null
       done
 }
 
 bar_restore_storage() {
+   [[ -s "$DUMPDIR/storage.tar.gz" ]] || return 0
+   bar_log '-----> Restore storage'
    ssh "root@$DOKKU_HOST" tar xzC /var/lib/dokku/data/storage . \
       < "$DUMPDIR/storage.tar.gz"
 }
 
+bar_restore_postgres_service() {
+   local NAME="$1" APPNAME
+   bar_log "-----> Restore postgres service <$NAME>"
+   bar_pd postgres:create "$NAME"
+   bar_pd postgres:import "$NAME" <"$DUMPDIR/$NAME.pgdmp"
+   cat "$DUMPDIR/$NAME.links" \
+      | while read APPNAME ; do
+         [[ -n "$APPNAME" ]] || continue
+         bar_pd postgres:link "$NAME" "$APPNAME"
+      done
+}
+
 bar_restore_postgres() {
    local NAME APPNAME
+   bar_log '-----> Restore postgres services'
    cat "$DUMPDIR/postgres.list" \
       | while read NAME ; do
-      {
-         bar_pd postgres:create "$NAME" </dev/null
-         bar_pd postgres:import <"$DUMPDIR/$NAME.pgdmp"
-         cat "$DUMPDIR/$NAME.links" \
-            | while read APPNAME ; do
-               [ -n "$APPNAME" ] || continue
-               bar_pd postgres:link "$NAME" "$APPNAME"
-            done
-      } </dev/null
+         bar_restore_postgres_service "$NAME" </dev/null
       done
 }
 
 bar_restore_letsencrypt() {
    local NAME
+   bar_log '-----> Restore letsencrypt'
    cat "$DUMPDIR/letsencrypt.list" \
       | while read NAME ; do
-         [ -n "$NAME" ] || continue
-         bar_pd letsencrypt "$NAME"
+         [[ -n "$NAME" ]] && bar_pd letsencrypt "$NAME" </dev/null
       done
    bar_pd letsencrypt:cron-job --add
 }
 
+bar_restore_app() {
+   local NAME="$1"
+   local REMOTE="${REMOTE:-dokku}"
+   (
+      bar_log "-----> Restore app <$NAME>"
+      cd "$NAME"
+      SCALE="$(<"$DUMPDIR/$NAME.scale")"
+      bar_pd ps:scale "$NAME" $SCALE
+      BRANCH="$(git symbolic-ref HEAD | sed 's#.*/##')"
+      git remote | grep "\\<$REMOTE\\>" >/dev/null 2>&1 \
+         || git remote add "$REMOTE" "dokku@$DOKKU_HOST:$NAME"
+      git push "$REMOTE" "$BRANCH:master"
+   )
+}
+
 bar_restore_apps() {
-   local NAME BRANCH SCALE
-   : ${REMOTE:=dokku}
+   local NAME
+   bar_log '-----> Restore apps'
    cat "$DUMPDIR/apps.list" \
       | while read NAME ; do
-      (
-         bar_log "app restore <$NAME>"
-         cd "$NAME"
-         SCALE="$(<"$DUMPDIR/$NAME.scale")"
-         bar_pd ps:scale "$NAME" $SCALE
-         BRANCH="$(git symbolic-ref HEAD | sed 's#.*/##')"
-         git remote add "$REMOTE" "dokku@$DOKKU_HOST:$NAME"
-         git push "$REMOTE" "$BRANCH:master"
-      ) </dev/null
+         bar_restore_app "$NAME" </dev/null
       done
 }
 
@@ -201,14 +235,27 @@ bar_restore_generic_configs() {
    bar_pd config:set --global $CONFIGS
 }
 
+bar_set_domain() {
+   [[ -n "DOMAIN" ]] && bar_pd domains:set-global "$DOMAIN"
+}
+
 bar_restore() {
-   local DUMPDIR
-   [ -n "$1" ] && export DUMPDIR="$1"
+   local DUMPDIR="$DUMPDIR"
+   [[ -n "$RESTORE_DUMPDIR" ]] && DUMPDIR="$RESTORE_DUMPDIR"
+   [[ -n "$1" ]] && DUMPDIR="$1"
    if [[ ! -d "$DUMPDIR" ]] ; then
       bar_log "no accessible dumpdir"
       return 1
    fi
+   local DOKKU_HOST="$DOKKU_HOST"
+   [[ -n "DOKKU_RESTORE_HOST" ]] && DOKKU_HOST="$DOKKU_RESTORE_HOST"
+   export DUMPDIR DOKKU_HOST
+   if bar_is_true "$CHECK_ENV" ; then
+      env
+      return 1
+   fi
    bar_restore_generic_configs
+   bar_set_domain
    bar_restore_storage
    bar_restore_create_apps
    bar_restore_postgres
@@ -217,6 +264,7 @@ bar_restore() {
 }
 
 __BAR_MAIN__() {
+   [[ -r ./dokku-bar.env ]] && . ./dokku-bar.env
    case "$1" in
       (backup)
          bar_backup "$2"
@@ -224,8 +272,15 @@ __BAR_MAIN__() {
       (restore)
          bar_restore "$2"
          ;;
+      (env)
+         env
+         ;;
       (*)
-         bar_log "$0 [backup] [restore]"
+         bar_log ''
+         bar_log "$0 [backup] [restore] [env]"
+         bar_log ''
+         bar_help
+         bar_log ''
          ;;
    esac
 }
