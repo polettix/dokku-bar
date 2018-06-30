@@ -7,7 +7,7 @@ I have this:
 - this repository checked out in `/path/to/dokku-bar`
 - a directory `/path/to/doma.in` where I keep the repos for all the stuff
   that is deployed on `doma.in`
-- an environment file `dokku-bar.env` like this:
+- an environment file `/path/to/doma.in/dokku-bar.env` like this:
 
         #!/bin/bash
         : ${DISABLE_CHECKS:=yes}
