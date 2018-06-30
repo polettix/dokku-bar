@@ -247,6 +247,7 @@ bar_restore() {
       bar_log "no accessible dumpdir"
       return 1
    fi
+   DUMPDIR="$(readlink -f "$DUMPDIR")"
    local DOKKU_HOST="$DOKKU_HOST"
    [[ -n "DOKKU_RESTORE_HOST" ]] && DOKKU_HOST="$DOKKU_RESTORE_HOST"
    export DUMPDIR DOKKU_HOST
