@@ -1,5 +1,7 @@
 # Backup/Restore tool for Dokku
 
+This works for my setup, your mileage may vary.
+
 ## Setup
 
 I have this:
